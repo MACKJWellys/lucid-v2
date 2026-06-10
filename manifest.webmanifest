@@ -1,0 +1,12 @@
+{
+  "name": "Lucid — hear the world again",
+  "short_name": "Lucid",
+  "description": "A live listening experience by Vision Wellbeing. Your environment, recomposed in real time.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0c1022",
+  "theme_color": "#0c1022",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

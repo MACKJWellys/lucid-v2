@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0c1022">
+  <meta name="description" content="Lucid — a live listening experience. Put your headphones in and hear your world recomposed in real time.">
+  <title>Lucid — hear the world again</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <canvas id="orb"></canvas>
+
+  <main>
+    <header>
+      <h1>Lucid</h1>
+      <p class="tagline">hear the world again</p>
+    </header>
+
+    <section class="card" id="controls">
+      <p id="headphones-note" class="note">put your headphones in — Lucid listens to the world around you and recomposes it, live.</p>
+
+      <div class="modes">
+        <button class="mode-btn active" data-mode="lucid">Lucid</button>
+        <button class="mode-btn" data-mode="liminal">Liminal</button>
+      </div>
+
+      <label class="slider">
+        <span>presence</span>
+        <input type="range" id="intensity" min="0.15" max="1" step="0.01" value="0.6">
+      </label>
+
+      <button id="start" class="primary">begin</button>
+      <button id="stop" class="ghost">end session</button>
+
+      <p id="status" class="status" aria-live="polite"></p>
+    </section>
+
+    <footer>
+      <p>a <a href="https://visionwellbeing.ie" rel="noopener">Vision Wellbeing</a> experience · nothing is recorded or leaves your device</p>
+    </footer>
+  </main>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
