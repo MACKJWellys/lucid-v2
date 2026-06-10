@@ -19,6 +19,12 @@ Put your headphones in. Lucid listens to the sounds around you — voices, keys,
 - **Built-in textures** — synthesized leaves-in-wind and a log-crackle, rare and quiet, long fades.
 - **Compositional arc** — sessions move through *arrival → bloom → weave → release* phases (cycling, key shifting between cycles), so longer sessions have shape. Debug fast-forward: `?fastarc=1`.
 
+## Layers & the lab (round 3)
+
+Every sound source is a **layer** with its own bus, level, toggle, and analyser: Wash, Reflex, Echoes, Felt piano, Harmonic bed, Textures, Time smear. "Explore the layers" in the app opens the lab: per-layer explanations, switches, level sliders, and a live log-frequency spectrum where each layer draws in its own colour — built for giving precise feedback about each layer.
+
+Round 3 also reworked dynamics to remove the on/off jolt: partial RMS loudness normalization (quiet sounds keep some distance), slow swelling attacks with exponential releases, long curved fade-outs baked into captured buffers, a continuous harmonic bed so there is never true silence, and a **Reflex** layer that answers any distinct sound within ~0.4s of it happening.
+
 ## Tips for the best experience
 
 - **Wired headphones or earbuds give the best quality.** Bluetooth headphones that use their own mic drop to low-quality voice mode — if using Bluetooth, you may get better results letting the phone mic listen while audio plays through the headphones.

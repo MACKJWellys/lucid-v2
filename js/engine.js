@@ -18,6 +18,18 @@ const ARC = {
 };
 const ARC_NEXT = { arrival: 'bloom', bloom: 'weave', weave: 'release', release: 'bloom' };
 
+// Every sound-producing layer. Each is toggleable in the UI, has its own
+// level, and its own analyser for the per-layer spectrum view.
+export const LAYER_DEFS = [
+  { id: 'wash',     label: 'Wash',         hue: 210, desc: 'Your environment right now, softened and breathed into the reverb. The always-on presence.' },
+  { id: 'reflex',   label: 'Reflex',       hue: 268, desc: 'An immediate shimmering answer to sounds just as they happen — the fastest layer.' },
+  { id: 'echoes',   label: 'Echoes',       hue: 178, desc: 'Captured moments re-placed as patterns: slowing trails, bounces, clusters, reverses.' },
+  { id: 'piano',    label: 'Felt piano',   hue: 46,  desc: 'A soft felted piano answering tonal sounds on the nearest note of the current key.' },
+  { id: 'pad',      label: 'Harmonic bed', hue: 330, desc: 'A very quiet drone holding the current key under everything, so there is never true silence.' },
+  { id: 'textures', label: 'Textures',     hue: 110, desc: 'Synthesized leaves-in-wind and wood crackle. Rare, quiet colour.' },
+  { id: 'smear',    label: 'Time smear',   hue: 16,  desc: 'Liminal mode only: the last few seconds replayed slowed — forwards, then backwards.' },
+];
+
 export class LucidEngine {
   constructor() {
     this.ctx = null;
@@ -47,6 +59,15 @@ export class LucidEngine {
 
     // Liminal state
     this.liminalNextCapture = 0;
+
+    // Layer mixer: enabled/level survive across start/stop; nodes are
+    // rebuilt each session in buildGraph.
+    this.layerState = {};
+    for (const d of LAYER_DEFS) this.layerState[d.id] = { enabled: true, level: 1 };
+    this.layers = {};
+
+    // Reflex (immediate response) state
+    this.lastReflexAt = -10;
 
     // Harmony, textures, arc
     this.harmony = new Harmony();
@@ -137,6 +158,24 @@ export class LucidEngine {
     if (this.running) this.applyMode();
   }
 
+  setLayer(id, { enabled, level }) {
+    const st = this.layerState[id];
+    if (!st) return;
+    if (enabled !== undefined) st.enabled = enabled;
+    if (level !== undefined) st.level = level;
+    this.applyLayer(id);
+  }
+
+  applyLayer(id) {
+    const st = this.layerState[id];
+    const L = this.layers[id];
+    if (!L || !this.ctx) return;
+    const g = st.enabled ? st.level : 0;
+    const t = this.ctx.currentTime;
+    L.dryBus.gain.setTargetAtTime(g, t, 0.15);
+    L.wetBus.gain.setTargetAtTime(g, t, 0.15);
+  }
+
   // ---------------------------------------------------------------- graph
 
   buildGraph() {
@@ -165,7 +204,23 @@ export class LucidEngine {
     const reverbOut = ctx.createGain(); reverbOut.gain.value = 0.85;
     this.convolver.connect(reverbOut).connect(this.masterIn);
 
-    // Shimmer echo: filtered feedback delay feeding the reverb
+    // Layer buses: every sound-producing layer gets a dry bus (→ master),
+    // a wet bus (→ reverb), and an analyser tap for the spectrum view.
+    for (const def of LAYER_DEFS) {
+      const dryBus = ctx.createGain();
+      const wetBus = ctx.createGain();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.82;
+      dryBus.connect(this.masterIn);
+      wetBus.connect(this.reverbSend);
+      dryBus.connect(analyser);
+      wetBus.connect(analyser);
+      this.layers[def.id] = { dryBus, wetBus, analyser, hue: def.hue };
+      this.applyLayer(def.id);
+    }
+
+    // Shimmer echo: filtered feedback delay, attributed to the echoes layer
     this.echoSend = ctx.createGain(); this.echoSend.gain.value = 1.0;
     this.echoDelay = ctx.createDelay(2.0);
     this.echoDelay.delayTime.value = 0.43;
@@ -176,8 +231,8 @@ export class LucidEngine {
     this.echoDelay.connect(echoHP).connect(echoLP).connect(echoFb).connect(this.echoDelay);
     const echoOut = ctx.createGain(); echoOut.gain.value = 0.5;
     echoLP.connect(echoOut);
-    echoOut.connect(this.masterIn);
-    echoOut.connect(this.reverbSend);
+    echoOut.connect(this.layers.echoes.dryBus);
+    echoOut.connect(this.layers.echoes.wetBus);
 
     // Live wash: subtle real-time presence so the piece feels alive immediately.
     // Input → highpass → wash gain → phaser → echo + reverb (no dry path).
@@ -207,9 +262,64 @@ export class LucidEngine {
     this.phaserLFO.start();
 
     this.washIn.connect(washHP).connect(this.washGain).connect(phaserChainIn);
-    prev.connect(this.echoSend);
-    const washToVerb = ctx.createGain(); washToVerb.gain.value = 0.8;
-    prev.connect(washToVerb).connect(this.reverbSend);
+    prev.connect(this.layers.wash.wetBus);
+    const washDirect = ctx.createGain(); washDirect.gain.value = 0.25;
+    prev.connect(washDirect).connect(this.layers.wash.dryBus);
+
+    this.buildPad();
+  }
+
+  // A very quiet harmonic drone holding the current key — the bed that
+  // removes the "silence → jolt" contrast.
+  buildPad() {
+    const ctx = this.ctx;
+    this.padOscs = [];
+    this.padGain = ctx.createGain();
+    this.padGain.gain.value = 0;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 700; lp.Q.value = 0.4;
+    const lpLFO = ctx.createOscillator(); lpLFO.frequency.value = 0.045;
+    const lpDepth = ctx.createGain(); lpDepth.gain.value = 260;
+    lpLFO.connect(lpDepth).connect(lp.frequency);
+    lpLFO.start();
+
+    // Root (low), fifth, and a softly detuned root an octave up
+    const defs = [
+      { off: -12, type: 'triangle', g: 1.0, detune: 0 },
+      { off: -5,  type: 'triangle', g: 0.55, detune: 3 },
+      { off: 0,   type: 'sine',     g: 0.4, detune: -4 },
+    ];
+    for (const d of defs) {
+      const o = ctx.createOscillator();
+      o.type = d.type;
+      o.frequency.value = this.harmony.midiToHz(this.harmony.rootMidi + d.off);
+      o.detune.value = d.detune;
+      const g = ctx.createGain(); g.gain.value = d.g;
+      o.connect(g).connect(lp);
+      o.start();
+      this.padOscs.push({ osc: o, off: d.off });
+    }
+    lp.connect(this.padGain);
+    const dry = ctx.createGain(); dry.gain.value = 0.45;
+    this.padGain.connect(dry).connect(this.layers.pad.dryBus);
+    this.padGain.connect(this.layers.pad.wetBus);
+  }
+
+  updatePadKey() {
+    const t = this.ctx.currentTime;
+    for (const p of this.padOscs) {
+      p.osc.frequency.setTargetAtTime(
+        this.harmony.midiToHz(this.harmony.rootMidi + p.off), t, 4);
+    }
+  }
+
+  // Pad level breathes with the arc phase and overall ambient level
+  updatePadLevel() {
+    if (!this.padGain) return;
+    const phaseMul = { arrival: 0.6, bloom: 1.0, weave: 1.0, release: 1.35 }[this.arcPhase] || 1;
+    const base = 0.05 * (0.5 + this.intensity * 0.7) * phaseMul;
+    this.padGain.gain.setTargetAtTime(base, this.ctx.currentTime, 3);
   }
 
   makeImpulse(seconds, decay) {
@@ -232,9 +342,10 @@ export class LucidEngine {
 
   applyMode() {
     const t = this.ctx.currentTime;
-    const washBase = this.mode === 'liminal' ? 0.22 : 0.10;
+    const washBase = this.mode === 'liminal' ? 0.22 : 0.14;
     const wash = washBase * (0.4 + this.intensity * 0.9);
     this.washGain.gain.setTargetAtTime(wash, t, 0.8);
+    this.updatePadLevel();
     this.phaserDepth.gain.setTargetAtTime(this.mode === 'liminal' ? 900 : 220, t, 1.0);
     this.phaserLFO.frequency.setTargetAtTime(this.mode === 'liminal' ? 0.11 : 0.05, t, 1.0);
     this.echoDelay.delayTime.setTargetAtTime(this.mode === 'liminal' ? 0.74 : 0.43, t, 0.5);
@@ -248,7 +359,10 @@ export class LucidEngine {
       this.adaptWash();
       this.emit('level', msg);
     } else if (msg.type === 'onset') {
-      if (this.mode === 'lucid') this.considerCapture(msg);
+      if (this.mode === 'lucid') {
+        this.considerReflex(msg);
+        this.considerCapture(msg);
+      }
     } else if (msg.type === 'extracted') {
       const pending = this.extractPending.get(msg.id);
       this.extractPending.delete(msg.id);
@@ -260,8 +374,68 @@ export class LucidEngine {
     // Duck the live wash when the environment is loud so it doesn't smear
     if (!this.washGain) return;
     const loud = Math.min(1, this.level.slow / 0.05);
-    const base = (this.mode === 'liminal' ? 0.22 : 0.10) * (0.4 + this.intensity * 0.9);
+    const base = (this.mode === 'liminal' ? 0.22 : 0.14) * (0.4 + this.intensity * 0.9);
     this.washGain.gain.setTargetAtTime(base * (1 - loud * 0.7), this.ctx.currentTime, 0.6);
+  }
+
+  // Reflex: a fast shimmering answer to a sound just as it happens.
+  // ~0.4s from the real-world sound to its reply — the connection layer.
+  considerReflex(onset) {
+    const now = this.ctx.currentTime;
+    if (now - this.lastReflexAt < 1.8) return;
+    if (!this.layerState.reflex.enabled) return;
+    this.lastReflexAt = now;
+
+    const rate = this.ctx.sampleRate;
+    const durSamples = Math.floor(0.36 * rate);
+    const startAbs = Math.max(0, onset.abs - Math.floor(0.06 * rate));
+    setTimeout(() => {
+      if (!this.running) return;
+      const id = ++this.extractId;
+      this.extractPending.set(id, (msg) => this.playReflex(msg.samples, msg.rate));
+      this.workletNode.port.postMessage({ type: 'extract', id, startAbs, durSamples });
+    }, 320);
+  }
+
+  playReflex(samples, rate) {
+    const a = analyzeBuffer(samples, rate);
+    if (a.peak < 0.004) return;
+    let gain = Math.pow(0.09 / Math.max(a.rms, 1e-4), 0.55);
+    gain = Math.min(gain, 8, 0.6 / a.peak);
+
+    const ctx = this.ctx;
+    const buf = ctx.createBuffer(1, samples.length, rate);
+    buf.copyToChannel(applyFades(samples, rate, 0.015, 0.12), 0);
+    const L = this.layers.reflex;
+    const t0 = ctx.currentTime + 0.04;
+    const lvl = gain * (0.4 + this.intensity * 0.5);
+
+    // The sound itself, soft and mostly wet…
+    const plays = [
+      { at: 0, rate: 1.0, g: 1.0, pan: Math.random() * 0.6 - 0.3 },
+      // …then a sparkling fifth-up whisper just behind it
+      { at: 0.28 + Math.random() * 0.15, rate: 1.5, g: 0.45, pan: Math.random() * 1.0 - 0.5 },
+    ];
+    for (const p of plays) {
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.playbackRate.value = p.rate;
+      const env = ctx.createGain();
+      const dur = buf.duration / p.rate;
+      env.gain.setValueAtTime(0, t0 + p.at);
+      env.gain.linearRampToValueAtTime(lvl * p.g, t0 + p.at + 0.03);
+      env.gain.setTargetAtTime(0, t0 + p.at + dur * 0.6, dur * 0.2);
+      const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 380;
+      const pn = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
+      if (pn.pan) pn.pan.value = p.pan;
+      src.connect(env).connect(hp).connect(pn);
+      const dry = ctx.createGain(); dry.gain.value = 0.35;
+      const verb = ctx.createGain(); verb.gain.value = 0.85;
+      pn.connect(dry).connect(L.dryBus);
+      pn.connect(verb).connect(L.wetBus);
+      src.start(t0 + p.at);
+    }
+    this.emit('gesture', { lane: 'reflex', pattern: 'reply', repeats: 2, duration: buf.duration });
   }
 
   considerCapture(onset) {
@@ -289,10 +463,12 @@ export class LucidEngine {
     const a = analyzeBuffer(samples, rate);
     if (a.peak < 0.004) return;                            // too quiet even for us
 
-    // Adaptive normalization: bring every moment to a useful level.
-    // Quiet, distant sounds get lifted (the fix for "hard to hear when quiet").
-    const targetPeak = 0.5;
-    const gain = Math.min(18, targetPeak / a.peak);
+    // Partial loudness normalization: quiet, distant sounds get lifted so
+    // they're audible, but keep some of their natural distance (exponent
+    // < 1) so replays don't all jolt out at one loudness.
+    const targetRms = 0.11;
+    let gain = Math.pow(targetRms / Math.max(a.rms, 1e-4), 0.65);
+    gain = Math.min(gain, 14, 0.8 / a.peak);               // peak safety
 
     const lane = a.lowRatio > 0.48 ? 'low' : (a.highRatio > 0.36 ? 'high' : 'mid');
     const interest = Math.min(10, onset.strength) * a.crest;
@@ -303,7 +479,7 @@ export class LucidEngine {
     const tonal = !!(pitch && pitch.clarity > 0.62);
 
     const buffer = this.ctx.createBuffer(1, samples.length, rate);
-    buffer.copyToChannel(applyFades(samples, rate), 0);
+    buffer.copyToChannel(applyFades(samples, rate, 0.03, 0.22), 0);
 
     const moment = {
       buffer, lane, gain, interest,
@@ -433,12 +609,14 @@ export class LucidEngine {
 
     const env = ctx.createGain();
     const level = moment.gain * ev.gain * this.laneLevel(moment.lane);
-    const fade = Math.min(0.04, moment.duration * 0.2);
-    env.gain.setValueAtTime(0, when);
-    env.gain.linearRampToValueAtTime(level, when + fade);
     const durOut = (ev.slice ? ev.slice : moment.duration) / ev.rate;
-    env.gain.setValueAtTime(level, Math.max(when + fade, when + durOut - 0.08));
-    env.gain.linearRampToValueAtTime(0, when + durOut + 0.02);
+    // Gentle swell in, long exponential release out — no on/off jolt.
+    // Clusters keep snappy grains; everything else breathes.
+    const atk = ev.slice ? 0.012 : Math.min(0.07 + Math.random() * 0.07, durOut * 0.3);
+    const relTau = ev.slice ? 0.04 : Math.min(0.25, durOut * 0.25);
+    env.gain.setValueAtTime(0, when);
+    env.gain.linearRampToValueAtTime(level, when + atk);
+    env.gain.setTargetAtTime(0, Math.max(when + atk, when + durOut - relTau * 1.5), relTau);
 
     const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
     if (pan.pan) pan.pan.value = ev.pan;
@@ -457,12 +635,13 @@ export class LucidEngine {
     if (toneOut !== env) { /* already connected above */ }
     toneOut.connect(pan);
 
-    // Dry + sends: later repeats get wetter and more distant
+    // Dry + sends through the echoes layer: later repeats get wetter
+    const L = this.layers.echoes;
     const dry = ctx.createGain(); dry.gain.value = 1 - ev.wet * 0.7;
     const verb = ctx.createGain(); verb.gain.value = 0.25 + ev.wet * 0.75;
     const echo = ctx.createGain(); echo.gain.value = ev.echo;
-    pan.connect(dry).connect(this.masterIn);
-    pan.connect(verb).connect(this.reverbSend);
+    pan.connect(dry).connect(L.dryBus);
+    pan.connect(verb).connect(L.wetBus);
     pan.connect(echo).connect(this.echoSend);
 
     if (ev.slice) {
@@ -471,7 +650,7 @@ export class LucidEngine {
     } else {
       src.start(when);
     }
-    src.stop(when + durOut + 0.1);
+    src.stop(when + durOut + relTau * 6 + 0.1);
   }
 
   laneLevel(lane) {
@@ -489,6 +668,7 @@ export class LucidEngine {
     if (now < this.arcUntil) return;
     this.arcPhase = ARC_NEXT[this.arcPhase];
     this.arcUntil = now + this.arcDur(this.arcPhase);
+    this.updatePadLevel();
     if (this.arcPhase === 'bloom') {
       this.arcCycles++;
       if (this.arcCycles > 1) {
@@ -512,8 +692,8 @@ export class LucidEngine {
     src.connect(g).connect(p);
     const dry = ctx.createGain(); dry.gain.value = 0.75;
     const verb = ctx.createGain(); verb.gain.value = 0.6;
-    p.connect(dry).connect(this.masterIn);
-    p.connect(verb).connect(this.reverbSend);
+    p.connect(dry).connect(this.layers.piano.dryBus);
+    p.connect(verb).connect(this.layers.piano.wetBus);
     src.start(when);
   }
 
@@ -573,8 +753,8 @@ export class LucidEngine {
     src.connect(g).connect(p);
     const dry = ctx.createGain(); dry.gain.value = 0.6;
     const verb = ctx.createGain(); verb.gain.value = 0.5;
-    p.connect(dry).connect(this.masterIn);
-    p.connect(verb).connect(this.reverbSend);
+    p.connect(dry).connect(this.layers.textures.dryBus);
+    p.connect(verb).connect(this.layers.textures.wetBus);
     src.start(t0);
     this.emit('gesture', { lane: 'texture', pattern: kind, repeats: 1, duration: dur });
   }
@@ -635,8 +815,8 @@ export class LucidEngine {
       src.connect(env).connect(pan);
       const dry = ctx.createGain(); dry.gain.value = 1 - seg.wet * 0.8;
       const verb = ctx.createGain(); verb.gain.value = seg.wet;
-      pan.connect(dry).connect(this.masterIn);
-      pan.connect(verb).connect(this.reverbSend);
+      pan.connect(dry).connect(this.layers.smear.dryBus);
+      pan.connect(verb).connect(this.layers.smear.wetBus);
       src.start(t);
       t += segDur - overlap;
     });
@@ -674,13 +854,14 @@ function analyzeBuffer(samples, rate) {
   };
 }
 
-function applyFades(samples, rate, fadeSec = 0.02) {
+function applyFades(samples, rate, inSec = 0.03, outSec = 0.2) {
   const out = samples; // in place is fine — we own the buffer
-  const f = Math.min(Math.floor(fadeSec * rate), Math.floor(samples.length / 3));
-  for (let i = 0; i < f; i++) {
-    const g = i / f;
-    out[i] *= g;
-    out[out.length - 1 - i] *= g;
+  const fi = Math.min(Math.floor(inSec * rate), Math.floor(samples.length / 3));
+  const fo = Math.min(Math.floor(outSec * rate), Math.floor(samples.length / 2));
+  for (let i = 0; i < fi; i++) out[i] *= i / fi;
+  for (let i = 0; i < fo; i++) {
+    const g = i / fo;
+    out[out.length - 1 - i] *= g * g;   // long, curved tail — no cliff of hiss
   }
   return out;
 }

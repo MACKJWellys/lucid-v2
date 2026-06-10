@@ -1,5 +1,5 @@
 // Lucid — UI, visuals, lifecycle
-import { LucidEngine } from './engine.js';
+import { LucidEngine, LAYER_DEFS } from './engine.js';
 
 const $ = (s) => document.querySelector(s);
 const engine = new LucidEngine();
@@ -82,6 +82,102 @@ engine.on('phase', (p) => {
 });
 engine.on('key', (k) => console.log('[lucid] key shift', k));
 
+// ------------------------------------------------------------------ lab panel
+// Per-layer toggles + levels with explanations, and a live spectrum where
+// each layer draws in its own colour.
+
+const labEl = $('#lab');
+const labToggle = $('#lab-toggle');
+const rowsEl = $('#layer-rows');
+const spectrum = $('#spectrum');
+const spectrumCtx = spectrum.getContext('2d');
+
+const savedLayers = JSON.parse(localStorage.getItem('lucid-layers') || '{}');
+
+for (const def of LAYER_DEFS) {
+  const saved = savedLayers[def.id] || {};
+  const enabled = saved.enabled !== undefined ? saved.enabled : true;
+  const level = saved.level !== undefined ? saved.level : 1;
+  engine.setLayer(def.id, { enabled, level });
+
+  const row = document.createElement('div');
+  row.className = 'layer-row';
+  row.innerHTML = `
+    <div class="layer-top">
+      <span class="layer-dot" style="background:hsl(${def.hue},70%,62%)"></span>
+      <span class="layer-name">${def.label}</span>
+      <label class="switch">
+        <input type="checkbox" data-layer="${def.id}" ${enabled ? 'checked' : ''}>
+        <span class="track"></span>
+      </label>
+    </div>
+    <p class="layer-desc">${def.desc}</p>
+    <input type="range" class="layer-level" data-layer="${def.id}"
+           min="0" max="1.5" step="0.01" value="${level}">
+  `;
+  rowsEl.appendChild(row);
+}
+
+function persistLayers() {
+  const out = {};
+  for (const def of LAYER_DEFS) out[def.id] = { ...engine.layerState[def.id] };
+  localStorage.setItem('lucid-layers', JSON.stringify(out));
+}
+
+rowsEl.addEventListener('change', (e) => {
+  if (e.target.matches('input[type="checkbox"]')) {
+    engine.setLayer(e.target.dataset.layer, { enabled: e.target.checked });
+    persistLayers();
+  }
+});
+rowsEl.addEventListener('input', (e) => {
+  if (e.target.matches('.layer-level')) {
+    engine.setLayer(e.target.dataset.layer, { level: parseFloat(e.target.value) });
+    persistLayers();
+  }
+});
+
+labToggle.addEventListener('click', () => {
+  labEl.hidden = !labEl.hidden;
+  labToggle.textContent = labEl.hidden ? 'explore the layers' : 'close layers';
+});
+
+// Spectrum: log-frequency, one translucent filled curve per enabled layer
+const freqData = new Uint8Array(512);
+function drawSpectrum() {
+  requestAnimationFrame(drawSpectrum);
+  if (labEl.hidden || !engine.running || !engine.ctx) return;
+  const w = spectrum.width, h = spectrum.height;
+  spectrumCtx.clearRect(0, 0, w, h);
+  const nyquist = engine.ctx.sampleRate / 2;
+  const fMin = 50, fMax = 14000;
+
+  for (const def of LAYER_DEFS) {
+    const L = engine.layers[def.id];
+    const st = engine.layerState[def.id];
+    if (!L || !st.enabled) continue;
+    L.analyser.getByteFrequencyData(freqData);
+    const bins = L.analyser.frequencyBinCount;
+
+    spectrumCtx.beginPath();
+    spectrumCtx.moveTo(0, h);
+    for (let x = 0; x <= w; x += 4) {
+      const f = fMin * Math.pow(fMax / fMin, x / w);
+      const bin = Math.min(bins - 1, Math.round(f / nyquist * bins));
+      const v = freqData[bin] / 255;
+      spectrumCtx.lineTo(x, h - Math.pow(v, 1.4) * h);
+    }
+    spectrumCtx.lineTo(w, h);
+    spectrumCtx.closePath();
+    spectrumCtx.fillStyle = `hsla(${def.hue}, 70%, 60%, 0.16)`;
+    spectrumCtx.fill();
+    spectrumCtx.strokeStyle = `hsla(${def.hue}, 75%, 65%, 0.75)`;
+    spectrumCtx.lineWidth = 1.4;
+    spectrumCtx.stroke();
+  }
+}
+drawSpectrum();
+
 // ------------------------------------------------------------------ visuals
 // A breathing orb that swells with ambient level; gestures spawn ripples.
 
@@ -92,7 +188,7 @@ let levelSmooth = 0;
 let frame = 0;
 
 function ripple(lane) {
-  const hue = { low: 16, mid: 178, high: 268, liminal: 210, piano: 46, texture: 110 }[lane] || 178;
+  const hue = { low: 16, mid: 178, high: 268, liminal: 210, piano: 46, texture: 110, reflex: 268 }[lane] || 178;
   ripples.push({ r: 0, alpha: 0.55, hue, speed: 0.8 + Math.random() * 0.7 });
 }
 
