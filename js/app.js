@@ -174,12 +174,27 @@ function scheduleDemoSounds(ac, bus) {
     o.connect(g).connect(bus);
     o.start(when); o.stop(when + 0.35);
   }
+  function tone(when) {
+    // Mid-range, voice/melodic territory
+    const o = ac.createOscillator();
+    o.type = 'triangle';
+    const g = ac.createGain();
+    const f = 320 + Math.random() * 600;
+    o.frequency.setValueAtTime(f, when);
+    o.frequency.linearRampToValueAtTime(f * (0.92 + Math.random() * 0.2), when + 0.5);
+    g.gain.setValueAtTime(0, when);
+    g.gain.linearRampToValueAtTime(0.22, when + 0.05);
+    g.gain.exponentialRampToValueAtTime(0.001, when + 0.7);
+    o.connect(g).connect(bus);
+    o.start(when); o.stop(when + 0.8);
+  }
   function loop() {
     if (!engine.running) return;
     const now = ac.currentTime;
     const kind = Math.random();
-    if (kind < 0.45) chirp(now + 0.05);
-    else if (kind < 0.75) { click(now + 0.05); if (Math.random() < 0.5) click(now + 0.16); }
+    if (kind < 0.35) chirp(now + 0.05);
+    else if (kind < 0.6) { click(now + 0.05); if (Math.random() < 0.5) click(now + 0.16); }
+    else if (kind < 0.85) tone(now + 0.05);
     else thump(now + 0.05);
     setTimeout(loop, 900 + Math.random() * 2600);
   }
