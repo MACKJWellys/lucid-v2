@@ -38,6 +38,7 @@ startBtn.addEventListener('click', async () => {
 });
 
 stopBtn.addEventListener('click', () => {
+  console.log('[lucid] stop button pressed');
   engine.stop();
   document.body.classList.remove('running');
   startBtn.disabled = false;
