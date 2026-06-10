@@ -3,6 +3,21 @@
 // an evolving soundscape. Two modes: Lucid (moment composer) and Liminal
 // (forward/reverse time-smearing).
 
+import { Harmony, detectPitch } from './harmony.js';
+import { TexturePalette } from './textures.js';
+
+// Compositional arc: sessions move through phases instead of being
+// statistically uniform. density scales gesture rate; piano/texture are
+// per-check probabilities; answer is the chance a tonal gesture gets a
+// felt-piano reply.
+const ARC = {
+  arrival: { dur: [40, 55],   density: 0.6,  piano: 0.0,  texture: 0.08, answer: 0.0 },
+  bloom:   { dur: [80, 120],  density: 1.0,  piano: 0.2,  texture: 0.18, answer: 0.3 },
+  weave:   { dur: [100, 150], density: 1.3,  piano: 0.45, texture: 0.3,  answer: 0.5 },
+  release: { dur: [45, 75],   density: 0.55, piano: 0.12, texture: 0.25, answer: 0.15 },
+};
+const ARC_NEXT = { arrival: 'bloom', bloom: 'weave', weave: 'release', release: 'bloom' };
+
 export class LucidEngine {
   constructor() {
     this.ctx = null;
@@ -32,6 +47,15 @@ export class LucidEngine {
 
     // Liminal state
     this.liminalNextCapture = 0;
+
+    // Harmony, textures, arc
+    this.harmony = new Harmony();
+    this.arcSpeed = 1;             // >1 fast-forwards phases (debugging)
+    this.arcPhase = 'arrival';
+    this.arcUntil = 0;
+    this.arcCycles = 0;
+    this.nextTextureAt = 0;
+    this.nextPianoAt = 0;
 
     this._tickTimer = null;
   }
@@ -79,6 +103,12 @@ export class LucidEngine {
     this.workletNode.connect(sink).connect(this.ctx.destination);
 
     this.inputNode.connect(this.washIn);
+
+    this.textures = new TexturePalette(this.ctx);
+    this.arcPhase = 'arrival';
+    this.arcUntil = this.ctx.currentTime + this.arcDur('arrival');
+    this.nextTextureAt = this.ctx.currentTime + 20;
+    this.nextPianoAt = this.ctx.currentTime + 15;
 
     this.running = true;
     this.startedAt = this.ctx.currentTime;
@@ -267,11 +297,17 @@ export class LucidEngine {
     const lane = a.lowRatio > 0.48 ? 'low' : (a.highRatio > 0.36 ? 'high' : 'mid');
     const interest = Math.min(10, onset.strength) * a.crest;
 
+    // Is this moment tonal? If so the composer can retune it to the key
+    // and the piano can answer it.
+    const pitch = detectPitch(samples, rate);
+    const tonal = !!(pitch && pitch.clarity > 0.62);
+
     const buffer = this.ctx.createBuffer(1, samples.length, rate);
     buffer.copyToChannel(applyFades(samples, rate), 0);
 
     const moment = {
       buffer, lane, gain, interest,
+      tonal, pitchHz: tonal ? pitch.hz : 0,
       born: this.ctx.currentTime, lastUsed: -100, uses: 0,
       duration: samples.length / rate,
     };
@@ -283,7 +319,10 @@ export class LucidEngine {
       this.pool.splice(this.pool.indexOf(evict), 1);
     }
     this.pool.push(moment);
-    this.emit('moment', { lane, interest, duration: moment.duration, poolSize: this.pool.length });
+    this.emit('moment', {
+      lane, interest, tonal, pitchHz: moment.pitchHz,
+      duration: moment.duration, poolSize: this.pool.length,
+    });
   }
 
   // ---------------------------------------------------------------- composer
@@ -293,6 +332,19 @@ export class LucidEngine {
     const now = this.ctx.currentTime;
 
     if (this.mode === 'liminal') { this.tickLiminal(now); return; }
+
+    this.updateArc(now);
+    const arc = ARC[this.arcPhase];
+
+    // Built-in textures and independent piano phrases, gated by arc phase
+    if (now > this.nextTextureAt) {
+      this.nextTextureAt = now + 18 + Math.random() * 30;
+      if (Math.random() < arc.texture * (0.5 + this.intensity)) this.playTexture(now);
+    }
+    if (now > this.nextPianoAt) {
+      this.nextPianoAt = now + 14 + Math.random() * 18;
+      if (Math.random() < arc.piano * (0.5 + this.intensity)) this.playPianoPhrase(now);
+    }
 
     // Breathing density: slow sinusoid + occasional deliberate rests
     const breath = 0.55 + 0.45 * Math.sin(this.breathPhase + (now / this.breathPeriod) * Math.PI * 2);
@@ -305,7 +357,7 @@ export class LucidEngine {
     }
     if (now < this.restUntil) return;
 
-    const density = breath * (0.45 + this.intensity * 1.1);
+    const density = breath * (0.45 + this.intensity * 1.1) * arc.density;
 
     for (const lane of ['high', 'mid', 'low']) {
       if (now < this.laneNext[lane]) continue;
@@ -342,10 +394,31 @@ export class LucidEngine {
     const pattern = choosePattern(lane);
     const events = buildPattern(pattern, lane, moment);
 
+    // Harmonic retune: tonal moments land on scale tones. The adjustment is
+    // small (≤ ~1.5 semitones) so the sound stays recognisably itself.
+    if (moment.tonal) {
+      for (const ev of events) {
+        if (ev.glideTo) continue;                 // glides are deliberate sweeps
+        const desired = moment.pitchHz * ev.rate;
+        const target = this.harmony.nearestHz(desired);
+        const retuned = ev.rate * (target / desired);
+        if (retuned > 0.45 && retuned < 2.1) ev.rate = retuned;
+      }
+    }
+
     for (const ev of events) {
       this.playEvent(moment, t0 + ev.at, ev);
     }
-    this.emit('gesture', { lane, pattern, repeats: events.length, duration: moment.duration });
+
+    // Call-and-response: the felt piano answers what it just heard
+    const arc = ARC[this.arcPhase];
+    if (lane !== 'low' && Math.random() < arc.answer * (0.6 + this.intensity * 0.6)) {
+      const last = events[events.length - 1];
+      const answerAt = t0 + last.at + moment.duration / last.rate + 0.5 + Math.random() * 0.8;
+      this.playPianoAnswer(moment, answerAt);
+    }
+
+    this.emit('gesture', { lane, pattern, repeats: events.length, duration: moment.duration, tonal: moment.tonal });
   }
 
   playEvent(moment, when, ev) {
@@ -403,6 +476,107 @@ export class LucidEngine {
 
   laneLevel(lane) {
     return { low: 0.7, mid: 1.0, high: 0.85 }[lane];
+  }
+
+  // ------------------------------------------------------------- arc & key
+
+  arcDur(phase) {
+    const [lo, hi] = ARC[phase].dur;
+    return (lo + Math.random() * (hi - lo)) / this.arcSpeed;
+  }
+
+  updateArc(now) {
+    if (now < this.arcUntil) return;
+    this.arcPhase = ARC_NEXT[this.arcPhase];
+    this.arcUntil = now + this.arcDur(this.arcPhase);
+    if (this.arcPhase === 'bloom') {
+      this.arcCycles++;
+      if (this.arcCycles > 1) {
+        this.harmony.shift();   // each new cycle settles in a neighbouring key
+        this.emit('key', { rootMidi: this.harmony.rootMidi });
+      }
+    }
+    this.emit('phase', this.arcPhase);
+  }
+
+  // --------------------------------------------------------- piano & textures
+
+  playPianoNote(hz, when, vel, pan = 0) {
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = this.textures.piano(hz);
+    const g = ctx.createGain();
+    g.gain.value = vel;
+    const p = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
+    if (p.pan) p.pan.value = pan;
+    src.connect(g).connect(p);
+    const dry = ctx.createGain(); dry.gain.value = 0.75;
+    const verb = ctx.createGain(); verb.gain.value = 0.6;
+    p.connect(dry).connect(this.masterIn);
+    p.connect(verb).connect(this.reverbSend);
+    src.start(when);
+  }
+
+  playPianoPhrase(now) {
+    const n = 2 + Math.floor(Math.random() * 3);
+    const notes = this.harmony.phrase(n, 12 + Math.floor(Math.random() * 10));
+    let t = now + 0.1;
+    const basePan = Math.random() * 0.8 - 0.4;
+    const vel = (0.10 + Math.random() * 0.08) * (0.5 + this.intensity * 0.8);
+    for (const hz of notes) {
+      this.playPianoNote(hz, t, vel * (0.85 + Math.random() * 0.3), basePan + (Math.random() * 0.3 - 0.15));
+      t += 0.55 + Math.random() * 0.85;
+    }
+    this.emit('gesture', { lane: 'piano', pattern: 'phrase', repeats: n, duration: t - now });
+  }
+
+  playPianoAnswer(moment, when) {
+    // The piano replies at the nearest scale tone to what it just heard,
+    // sometimes adding the octave or a second voice.
+    const heard = moment.tonal ? moment.pitchHz : 0;
+    let hz = heard ? this.harmony.nearestHz(heard) : this.harmony.randomToneHz(12, 26);
+    while (hz < 160) hz *= 2;          // keep answers out of the mud
+    while (hz > 1400) hz /= 2;
+    const vel = (0.12 + Math.random() * 0.07) * (0.5 + this.intensity * 0.8);
+    const pan = Math.random() * 0.8 - 0.4;
+    this.playPianoNote(hz, when, vel, pan);
+    if (Math.random() < 0.35) {
+      this.playPianoNote(hz * 2, when + 0.4 + Math.random() * 0.5, vel * 0.6, -pan);
+    }
+    this.emit('gesture', { lane: 'piano', pattern: 'answer', repeats: 1, duration: 2 });
+  }
+
+  playTexture(now) {
+    const ctx = this.ctx;
+    const kind = Math.random() < 0.55 ? 'leaves' : 'crackle';
+    const buf = kind === 'leaves' ? this.textures.leaves() : this.textures.crackle();
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = 0.92 + Math.random() * 0.16;
+
+    const level = (kind === 'leaves' ? 0.07 : 0.1) * (0.5 + this.intensity * 0.8);
+    const g = ctx.createGain();
+    const t0 = now + 0.1;
+    const dur = buf.duration / src.playbackRate.value;
+    const fade = kind === 'leaves' ? 2.0 : 0.4;
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(level, t0 + fade);
+    g.gain.setValueAtTime(level, t0 + dur - fade);
+    g.gain.linearRampToValueAtTime(0, t0 + dur);
+
+    const p = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
+    if (p.pan) {
+      const from = Math.random() * 1.2 - 0.6;
+      p.pan.setValueAtTime(from, t0);
+      p.pan.linearRampToValueAtTime(from * -0.5, t0 + dur);
+    }
+    src.connect(g).connect(p);
+    const dry = ctx.createGain(); dry.gain.value = 0.6;
+    const verb = ctx.createGain(); verb.gain.value = 0.5;
+    p.connect(dry).connect(this.masterIn);
+    p.connect(verb).connect(this.reverbSend);
+    src.start(t0);
+    this.emit('gesture', { lane: 'texture', pattern: kind, repeats: 1, duration: dur });
   }
 
   // ---------------------------------------------------------------- liminal

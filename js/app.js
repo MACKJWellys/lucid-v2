@@ -4,7 +4,9 @@ import { LucidEngine } from './engine.js';
 const $ = (s) => document.querySelector(s);
 const engine = new LucidEngine();
 window.lucid = engine; // for debugging / console poking
-const isDemo = new URLSearchParams(location.search).has('demo');
+const params = new URLSearchParams(location.search);
+const isDemo = params.has('demo');
+if (params.has('fastarc')) engine.arcSpeed = 8; // fast-forward phases for testing
 
 let wakeLock = null;
 
@@ -68,6 +70,18 @@ engine.on('gesture', (g) => {
 });
 engine.on('state', (s) => console.log('[lucid] state', s));
 
+const phaseWords = {
+  arrival: 'arriving — just listen for a moment',
+  bloom: 'the soundscape is forming',
+  weave: 'weaving your world into music',
+  release: 'space to breathe',
+};
+engine.on('phase', (p) => {
+  console.log('[lucid] phase', p);
+  if (engine.mode === 'lucid') setStatus(phaseWords[p] || '');
+});
+engine.on('key', (k) => console.log('[lucid] key shift', k));
+
 // ------------------------------------------------------------------ visuals
 // A breathing orb that swells with ambient level; gestures spawn ripples.
 
@@ -78,7 +92,7 @@ let levelSmooth = 0;
 let frame = 0;
 
 function ripple(lane) {
-  const hue = { low: 16, mid: 178, high: 268, liminal: 210 }[lane] || 178;
+  const hue = { low: 16, mid: 178, high: 268, liminal: 210, piano: 46, texture: 110 }[lane] || 178;
   ripples.push({ r: 0, alpha: 0.55, hue, speed: 0.8 + Math.random() * 0.7 });
 }
 
