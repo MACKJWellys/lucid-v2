@@ -48,11 +48,50 @@ stopBtn.addEventListener('click', () => {
   wakeLock?.release(); wakeLock = null;
 });
 
-modeBtns.forEach(btn => btn.addEventListener('click', () => {
-  modeBtns.forEach(b => b.classList.toggle('active', b === btn));
-  engine.setMode(btn.dataset.mode);
-  setStatus(btn.dataset.mode === 'liminal' ? 'liminal — time folds back on itself' : 'lucid — listening for moments');
-}));
+function selectMode(mode) {
+  modeBtns.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  engine.setMode(mode);
+  setStatus(mode === 'liminal' ? 'liminal — time folds back on itself' : 'lucid — listening for moments');
+}
+modeBtns.forEach(btn => btn.addEventListener('click', () => selectMode(btn.dataset.mode)));
+
+// ------------------------------------------------------------------ presets
+// One-tap intentions. Each sets activity, layer mix, mode, and the binaural
+// beat frequency (theta ≈ meditation, alpha ≈ calm focus).
+
+const PRESETS = {
+  walk:   { intensity: 0.75, mode: 'lucid',   beat: 10,  desc: 'lively and responsive — the world answers as you move',
+            layers: { wash: 1, reflex: 1.15, echoes: 1.1, piano: 0.9, pad: 0.8, drift: 0.7, binaural: 0.8, textures: 0.8, smear: 1 } },
+  ground: { intensity: 0.45, mode: 'lucid',   beat: 6,   desc: 'sparse and warm, theta beat — sit and settle',
+            layers: { wash: 1.1, reflex: 0.8, echoes: 0.85, piano: 1, pad: 1.2, drift: 1.1, binaural: 1, textures: 1.1, smear: 1 } },
+  focus:  { intensity: 0.3,  mode: 'lucid',   beat: 10,  desc: 'minimal and steady, alpha beat — stay with what you are doing',
+            layers: { wash: 0.9, reflex: 0.6, echoes: 0.7, piano: 0.6, pad: 1.15, drift: 0.9, binaural: 1.1, textures: 0.5, smear: 1 } },
+  dream:  { intensity: 0.55, mode: 'liminal', beat: 4.5, desc: 'time folds, slow theta beat — drift',
+            layers: { wash: 1.2, reflex: 0.7, echoes: 0.8, piano: 0.7, pad: 1.25, drift: 1.2, binaural: 1.2, textures: 0.9, smear: 1.15 } },
+};
+
+const presetBtns = document.querySelectorAll('.preset-btn');
+function applyPreset(name) {
+  const p = PRESETS[name];
+  if (!p) return;
+  engine.setIntensity(p.intensity);
+  engine.setBinauralBeat(p.beat);
+  selectMode(p.mode);
+  for (const [id, level] of Object.entries(p.layers)) {
+    engine.setLayer(id, { enabled: true, level });
+  }
+  syncLabControls();
+  persistLayers();
+  presetBtns.forEach(b => b.classList.toggle('active', b.dataset.preset === name));
+  setStatus(p.desc);
+  localStorage.setItem('lucid-preset', name);
+}
+presetBtns.forEach(b => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
+
+function clearPresetHighlight() {
+  presetBtns.forEach(b => b.classList.remove('active'));
+  localStorage.removeItem('lucid-preset');
+}
 
 intensityEl.addEventListener('input', () => engine.setIntensity(parseFloat(intensityEl.value)));
 engine.setIntensity(parseFloat(intensityEl.value));
@@ -124,18 +163,40 @@ function persistLayers() {
   localStorage.setItem('lucid-layers', JSON.stringify(out));
 }
 
+function syncLabControls() {
+  for (const def of LAYER_DEFS) {
+    const st = engine.layerState[def.id];
+    const cb = rowsEl.querySelector(`input[type="checkbox"][data-layer="${def.id}"]`);
+    const sl = rowsEl.querySelector(`.layer-level[data-layer="${def.id}"]`);
+    if (cb) cb.checked = st.enabled;
+    if (sl) sl.value = st.level;
+  }
+  intensityEl.value = engine.intensity;
+}
+
 rowsEl.addEventListener('change', (e) => {
   if (e.target.matches('input[type="checkbox"]')) {
     engine.setLayer(e.target.dataset.layer, { enabled: e.target.checked });
     persistLayers();
+    clearPresetHighlight();
   }
 });
 rowsEl.addEventListener('input', (e) => {
   if (e.target.matches('.layer-level')) {
     engine.setLayer(e.target.dataset.layer, { level: parseFloat(e.target.value) });
     persistLayers();
+    clearPresetHighlight();
   }
 });
+
+// Restore the last chosen preset highlight (layer state itself is restored above)
+{
+  const savedPreset = localStorage.getItem('lucid-preset');
+  if (savedPreset && PRESETS[savedPreset]) {
+    presetBtns.forEach(b => b.classList.toggle('active', b.dataset.preset === savedPreset));
+    engine.setBinauralBeat(PRESETS[savedPreset].beat);
+  }
+}
 
 labToggle.addEventListener('click', () => {
   labEl.hidden = !labEl.hidden;

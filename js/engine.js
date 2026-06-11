@@ -25,7 +25,9 @@ export const LAYER_DEFS = [
   { id: 'reflex',   label: 'Reflex',       hue: 268, desc: 'An immediate shimmering answer to sounds just as they happen — the fastest layer.' },
   { id: 'echoes',   label: 'Echoes',       hue: 178, desc: 'Captured moments re-placed as patterns: slowing trails, bounces, clusters, reverses.' },
   { id: 'piano',    label: 'Felt piano',   hue: 46,  desc: 'A soft felted piano answering tonal sounds on the nearest note of the current key.' },
-  { id: 'pad',      label: 'Harmonic bed', hue: 330, desc: 'A very quiet drone holding the current key under everything, so there is never true silence.' },
+  { id: 'pad',      label: 'Harmonic bed', hue: 330, desc: 'A very quiet drone under everything, slowly cycling: hold… glide down… partway back up… return. There is never true silence.' },
+  { id: 'drift',    label: 'Overtones',    hue: 300, desc: 'Two slow voices drifting between high notes of the key above the bed — extra harmonic colour that never repeats itself.' },
+  { id: 'binaural', label: 'Binaural beat', hue: 255, desc: 'Two barely-different tones, one in each ear. The slow beat your brain hears between them (4–10 Hz) is associated in research with relaxed, meditative states. Headphones only; subtle by design.' },
   { id: 'textures', label: 'Textures',     hue: 110, desc: 'Synthesized leaves-in-wind and wood crackle. Rare, quiet colour.' },
   { id: 'smear',    label: 'Time smear',   hue: 16,  desc: 'Liminal mode only: the last few seconds replayed slowed — forwards, then backwards.' },
 ];
@@ -68,6 +70,14 @@ export class LucidEngine {
 
     // Reflex (immediate response) state
     this.lastReflexAt = -10;
+
+    // Bed progression + binaural state
+    this.padProg = [0, -5, -3];    // hold root → glide down a 4th → partway up → return
+    this.padProgIdx = 0;
+    this.padRootOffset = 0;
+    this.nextPadStepAt = 0;
+    this.binauralBeat = 7;          // Hz; presets choose theta/alpha
+    this.driftVoices = [];
 
     // Harmony, textures, arc
     this.harmony = new Harmony();
@@ -130,6 +140,9 @@ export class LucidEngine {
     this.arcUntil = this.ctx.currentTime + this.arcDur('arrival');
     this.nextTextureAt = this.ctx.currentTime + 20;
     this.nextPianoAt = this.ctx.currentTime + 15;
+    this.nextPadStepAt = this.ctx.currentTime + (20 + Math.random() * 10) / (this.arcSpeed > 1 ? 5 : 1);
+    this.padProgIdx = 0;
+    this.padRootOffset = 0;
 
     this.running = true;
     this.startedAt = this.ctx.currentTime;
@@ -267,6 +280,8 @@ export class LucidEngine {
     prev.connect(washDirect).connect(this.layers.wash.dryBus);
 
     this.buildPad();
+    this.buildDrift();
+    this.buildBinaural();
   }
 
   // A very quiet harmonic drone holding the current key — the bed that
@@ -306,11 +321,97 @@ export class LucidEngine {
     this.padGain.connect(this.layers.pad.wetBus);
   }
 
-  updatePadKey() {
+  updatePadKey(glideTau = 2.5) {
     const t = this.ctx.currentTime;
     for (const p of this.padOscs) {
       p.osc.frequency.setTargetAtTime(
-        this.harmony.midiToHz(this.harmony.rootMidi + p.off), t, 4);
+        this.harmony.midiToHz(this.harmony.rootMidi + this.padRootOffset + p.off), t, glideTau);
+    }
+    this.updateBinaural();
+  }
+
+  // Overtones: two slow upper voices that fade out, retune to another note
+  // of the key, and fade back in — never the same twice.
+  buildDrift() {
+    const ctx = this.ctx;
+    const master = ctx.createGain();
+    master.gain.value = 0.05;
+    const dry = ctx.createGain(); dry.gain.value = 0.35;
+    master.connect(dry).connect(this.layers.drift.dryBus);
+    master.connect(this.layers.drift.wetBus);
+
+    this.driftVoices = [];
+    [[-0.45, 16], [0.45, 34]].forEach(([panVal, stagger]) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = this.harmony.midiToHz(this.harmony.rootMidi + 12);
+      const g = ctx.createGain(); g.gain.value = 0;
+      const p = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
+      if (p.pan) p.pan.value = panVal;
+      osc.connect(g).connect(p).connect(master);
+      osc.start();
+      this.driftVoices.push({ osc, g, nextChangeAt: this.ctx.currentTime + stagger });
+    });
+  }
+
+  changeDriftVoice(v, now) {
+    const offs = [7, 9, 12, 14, 19, 21]; // scale tones above the bed root
+    const off = offs[Math.floor(Math.random() * offs.length)];
+    const hz = this.harmony.midiToHz(this.harmony.rootMidi + this.padRootOffset + off);
+    v.g.gain.setTargetAtTime(0, now, 2.2);                 // breathe out…
+    v.osc.frequency.setTargetAtTime(hz, now + 6.5, 0.1);   // …retune while silent…
+    v.g.gain.setTargetAtTime(0.5, now + 7.5, 3);           // …breathe back in
+    v.nextChangeAt = now + 24 + Math.random() * 18;
+  }
+
+  // Binaural beat: same low tone in each ear, offset by a few Hz. Dry only —
+  // reverb would blur the interaural difference the effect depends on.
+  buildBinaural() {
+    const ctx = this.ctx;
+    const master = ctx.createGain();
+    master.gain.value = 0.05;
+    master.connect(this.layers.binaural.dryBus);
+    const make = (panVal) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      const p = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
+      if (p.pan) p.pan.value = panVal;
+      osc.connect(p).connect(master);
+      osc.start();
+      return osc;
+    };
+    this.binL = make(-1);
+    this.binR = make(1);
+    this.updateBinaural();
+  }
+
+  updateBinaural() {
+    if (!this.binL) return;
+    let carrier = this.harmony.midiToHz(this.harmony.rootMidi + this.padRootOffset - 12);
+    while (carrier > 200) carrier /= 2;   // keep the carrier low and gentle
+    while (carrier < 80) carrier *= 2;
+    const t = this.ctx.currentTime;
+    this.binL.frequency.setTargetAtTime(carrier - this.binauralBeat / 2, t, 2.5);
+    this.binR.frequency.setTargetAtTime(carrier + this.binauralBeat / 2, t, 2.5);
+  }
+
+  setBinauralBeat(hz) {
+    this.binauralBeat = Math.max(2, Math.min(12, hz));
+    if (this.running) this.updateBinaural();
+  }
+
+  // Bed progression + overtone voices, ticking in both modes
+  tickBeds(now) {
+    const speedUp = this.arcSpeed > 1 ? 5 : 1; // follow ?fastarc for testing
+    if (now > this.nextPadStepAt) {
+      this.nextPadStepAt = now + (24 + Math.random() * 14) / speedUp;
+      this.padProgIdx = (this.padProgIdx + 1) % this.padProg.length;
+      this.padRootOffset = this.padProg[this.padProgIdx];
+      this.updatePadKey();
+      this.emit('bed', { offset: this.padRootOffset });
+    }
+    for (const v of this.driftVoices) {
+      if (now > v.nextChangeAt) this.changeDriftVoice(v, now);
     }
   }
 
@@ -507,6 +608,8 @@ export class LucidEngine {
     if (!this.running || !this.ctx) return;
     const now = this.ctx.currentTime;
 
+    this.tickBeds(now);
+
     if (this.mode === 'liminal') { this.tickLiminal(now); return; }
 
     this.updateArc(now);
@@ -618,8 +721,28 @@ export class LucidEngine {
     env.gain.linearRampToValueAtTime(level, when + atk);
     env.gain.setTargetAtTime(0, Math.max(when + atk, when + durOut - relTau * 1.5), relTau);
 
-    const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
-    if (pan.pan) pan.pan.value = ev.pan;
+    // Spatial: about half of full moments are placed truly in 3D (HRTF) —
+    // beside, above, even behind you. Grains and the rest use stereo pan.
+    let pan;
+    if (!ev.slice && Math.random() < 0.5 && typeof ctx.createPanner === 'function') {
+      pan = ctx.createPanner();
+      pan.panningModel = 'HRTF';
+      pan.distanceModel = 'inverse';
+      pan.refDistance = 1;
+      const az = Math.random() * Math.PI * 2;        // full circle, behind included
+      const r = 1.3 + Math.random() * 2.2;
+      const x = Math.sin(az) * r;
+      const z = -Math.cos(az) * r;
+      const y = (Math.random() - 0.35) * 0.9;
+      if (pan.positionX) {
+        pan.positionX.value = x; pan.positionY.value = y; pan.positionZ.value = z;
+      } else {
+        pan.setPosition(x, y, z);
+      }
+    } else {
+      pan = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
+      if (pan.pan) pan.pan.value = ev.pan;
+    }
 
     // Per-lane tone shaping
     let toneOut = env;
@@ -673,6 +796,7 @@ export class LucidEngine {
       this.arcCycles++;
       if (this.arcCycles > 1) {
         this.harmony.shift();   // each new cycle settles in a neighbouring key
+        this.updatePadKey(4);   // bed and binaural glide to the new key
         this.emit('key', { rootMidi: this.harmony.rootMidi });
       }
     }

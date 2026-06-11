@@ -25,6 +25,14 @@ Every sound source is a **layer** with its own bus, level, toggle, and analyser:
 
 Round 3 also reworked dynamics to remove the on/off jolt: partial RMS loudness normalization (quiet sounds keep some distance), slow swelling attacks with exponential releases, long curved fade-outs baked into captured buffers, a continuous harmonic bed so there is never true silence, and a **Reflex** layer that answers any distinct sound within ~0.4s of it happening.
 
+## Round 4 — progression, binaural, presets, 3D
+
+- **Bed progression** — the harmonic bed slowly cycles: hold the root ~25–38s, glide down a fourth, rise partway back, return. Key shifts between arc cycles now glide the bed too.
+- **Overtones layer** — two slow upper voices breathing in and out on notes of the key, retuning while silent. Never repeats itself.
+- **Binaural beat layer** — the same low tone in each ear offset by a few Hz (dry only; reverb would blur the interaural difference). Presets choose theta (~4–6 Hz, meditative) or alpha (~10 Hz, calm focus).
+- **Presets** — walk / ground / focus / dream: one tap sets activity, the layer mix, mode, and beat frequency. Tweaking any layer switches you back to a custom mix.
+- **3D space** — about half of replayed moments are placed with HRTF panning: beside, above, even behind you.
+
 ## Tips for the best experience
 
 - **Wired headphones or earbuds give the best quality.** Bluetooth headphones that use their own mic drop to low-quality voice mode — if using Bluetooth, you may get better results letting the phone mic listen while audio plays through the headphones.

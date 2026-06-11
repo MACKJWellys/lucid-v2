@@ -78,6 +78,33 @@ header h1 {
   margin-bottom: 18px;
 }
 
+.presets {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.preset-btn {
+  flex: 1;
+  padding: 8px 0;
+  border-radius: 10px;
+  border: 1px solid rgba(232, 238, 242, 0.12);
+  background: transparent;
+  color: var(--ink-dim);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.preset-btn.active {
+  background: rgba(127, 224, 212, 0.12);
+  color: var(--accent);
+  border-color: rgba(127, 224, 212, 0.4);
+}
+
+.preset-hint { margin-bottom: 14px; text-align: center; }
+
 .modes {
   display: flex;
   gap: 8px;
